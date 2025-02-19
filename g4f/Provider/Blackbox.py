@@ -1,374 +1,338 @@
 from __future__ import annotations
 
-import asyncio
-import aiohttp
+from aiohttp import ClientSession
+import re
+import json
 import random
 import string
-import json
-import uuid
-import re
-from typing import Optional, AsyncGenerator, Union
+from pathlib import Path
+from typing import Optional
+from datetime import datetime, timezone
 
-from aiohttp import ClientSession, ClientResponseError
-
-from ..typing import AsyncResult, Messages, ImageType
+from ..typing import AsyncResult, Messages, ImagesType
+from ..requests.raise_for_status import raise_for_status
 from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
-from ..image import ImageResponse, to_data_uri
+from ..image import to_data_uri
+from ..cookies import get_cookies_dir
+from .helper import format_prompt, format_image_prompt
+from ..providers.response import JsonConversation, ImageResponse
+from ..errors import ModelNotSupportedError
 
+class Conversation(JsonConversation):
+    validated_value: str = None
+    chat_id: str = None
+    message_history: Messages = []
+
+    def __init__(self, model: str):
+        self.model = model
 
 class Blackbox(AsyncGeneratorProvider, ProviderModelMixin):
     label = "Blackbox AI"
     url = "https://www.blackbox.ai"
     api_endpoint = "https://www.blackbox.ai/api/chat"
+    
     working = True
     supports_stream = True
     supports_system_message = True
     supports_message_history = True
+    
+    default_model = "blackboxai"
+    default_vision_model = default_model
+    default_image_model = 'ImageGeneration' 
+    
+    image_models = [default_image_model]   
+    vision_models = [default_vision_model, 'GPT-4o', 'o3-mini', 'Gemini-PRO', 'gemini-1.5-flash', 'llama-3.1-8b', 'llama-3.1-70b', 'llama-3.1-405b', 'Gemini-Flash-2.0']
 
-    default_model = 'blackboxai'
-    image_models = ['ImageGeneration']
-    models = [
-        default_model,
-        'blackboxai-pro',
-        *image_models,
-        "llama-3.1-8b",
-        'llama-3.1-70b',
-        'llama-3.1-405b',
-        'gpt-4o',
-        'gemini-pro',
-        'gemini-1.5-flash',
-        'claude-sonnet-3.5',
-        'PythonAgent',
-        'JavaAgent',
-        'JavaScriptAgent',
-        'HTMLAgent',
-        'GoogleCloudAgent',
-        'AndroidDeveloper',
-        'SwiftDeveloper',
-        'Next.jsAgent',
-        'MongoDBAgent',
-        'PyTorchAgent',
-        'ReactAgent',
-        'XcodeAgent',
-        'AngularJSAgent',
-        'RepoMap',
-    ]
+    userSelectedModel = ['GPT-4o', 'o3-mini', 'Gemini-PRO', 'Claude-Sonnet-3.5', 'DeepSeek-V3', 'DeepSeek-R1', 'blackboxai-pro', 'Meta-Llama-3.3-70B-Instruct-Turbo', 'Mistral-Small-24B-Instruct-2501', 'DeepSeek-LLM-Chat-(67B)', 'DBRX-Instruct', 'Qwen-QwQ-32B-Preview', 'Nous-Hermes-2-Mixtral-8x7B-DPO', 'Gemini-Flash-2.0']
 
     agentMode = {
-        'ImageGeneration': {'mode': True, 'id': "ImageGenerationLV45LJp", 'name': "Image Generation"},
+        'DeepSeek-V3': {'mode': True, 'id': "deepseek-chat", 'name': "DeepSeek-V3"},
+        'DeepSeek-R1': {'mode': True, 'id': "deepseek-reasoner", 'name': "DeepSeek-R1"},
+        'Meta-Llama-3.3-70B-Instruct-Turbo': {'mode': True, 'id': "meta-llama/Llama-3.3-70B-Instruct-Turbo", 'name': "Meta-Llama-3.3-70B-Instruct-Turbo"},
+        'Mistral-Small-24B-Instruct-2501': {'mode': True, 'id': "mistralai/Mistral-Small-24B-Instruct-2501", 'name': "Mistral-Small-24B-Instruct-2501"},
+        'DeepSeek-LLM-Chat-(67B)': {'mode': True, 'id': "deepseek-ai/deepseek-llm-67b-chat", 'name': "DeepSeek-LLM-Chat-(67B)"},
+        'DBRX-Instruct': {'mode': True, 'id': "databricks/dbrx-instruct", 'name': "DBRX-Instruct"},
+        'Qwen-QwQ-32B-Preview': {'mode': True, 'id': "Qwen/QwQ-32B-Preview", 'name': "Qwen-QwQ-32B-Preview"},
+        'Nous-Hermes-2-Mixtral-8x7B-DPO': {'mode': True, 'id': "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO", 'name': "Nous-Hermes-2-Mixtral-8x7B-DPO"},
+        'Gemini-Flash-2.0': {'mode': True, 'id': "Gemini/Gemini-Flash-2.0", 'name': "Gemini-Flash-2.0"},
     }
 
     trendingAgentMode = {
-        "blackboxai": {},
+        "o3-mini": {'mode': True, 'id': 'o3-mini'},
         "gemini-1.5-flash": {'mode': True, 'id': 'Gemini'},
         "llama-3.1-8b": {'mode': True, 'id': "llama-3.1-8b"},
         'llama-3.1-70b': {'mode': True, 'id': "llama-3.1-70b"},
-        'llama-3.1-405b': {'mode': True, 'id': "llama-3.1-405b"},
+        'llama-3.1-405b': {'mode': True, 'id': "llama-3.1-405"},
+        'Python Agent': {'mode': True, 'id': "Python Agent"},
+        'Java Agent': {'mode': True, 'id': "Java Agent"},
+        'JavaScript Agent': {'mode': True, 'id': "JavaScript Agent"},
+        'HTML Agent': {'mode': True, 'id': "HTML Agent"},
+        'Google Cloud Agent': {'mode': True, 'id': "Google Cloud Agent"},
+        'Android Developer': {'mode': True, 'id': "Android Developer"},
+        'Swift Developer': {'mode': True, 'id': "Swift Developer"},
+        'Next.js Agent': {'mode': True, 'id': "Next.js Agent"},
+        'MongoDB Agent': {'mode': True, 'id': "MongoDB Agent"},
+        'PyTorch Agent': {'mode': True, 'id': "PyTorch Agent"},
+        'React Agent': {'mode': True, 'id': "React Agent"},
+        'Xcode Agent': {'mode': True, 'id': "Xcode Agent"},
+        'AngularJS Agent': {'mode': True, 'id': "AngularJS Agent"},
         'blackboxai-pro': {'mode': True, 'id': "BLACKBOXAI-PRO"},
-        'PythonAgent': {'mode': True, 'id': "Python Agent"},
-        'JavaAgent': {'mode': True, 'id': "Java Agent"},
-        'JavaScriptAgent': {'mode': True, 'id': "JavaScript Agent"},
-        'HTMLAgent': {'mode': True, 'id': "HTML Agent"},
-        'GoogleCloudAgent': {'mode': True, 'id': "Google Cloud Agent"},
-        'AndroidDeveloper': {'mode': True, 'id': "Android Developer"},
-        'SwiftDeveloper': {'mode': True, 'id': "Swift Developer"},
-        'Next.jsAgent': {'mode': True, 'id': "Next.js Agent"},
-        'MongoDBAgent': {'mode': True, 'id': "MongoDB Agent"},
-        'PyTorchAgent': {'mode': True, 'id': "PyTorch Agent"},
-        'ReactAgent': {'mode': True, 'id': "React Agent"},
-        'XcodeAgent': {'mode': True, 'id': "Xcode Agent"},
-        'AngularJSAgent': {'mode': True, 'id': "AngularJS Agent"},
-        'RepoMap': {'mode': True, 'id': "repomap"},
+        'repomap': {'mode': True, 'id': "repomap"},
+        'Heroku Agent': {'mode': True, 'id': "Heroku Agent"},
+        'Godot Agent': {'mode': True, 'id': "Godot Agent"},
+        'Go Agent': {'mode': True, 'id': "Go Agent"},
+        'Gitlab Agent': {'mode': True, 'id': "Gitlab Agent"},
+        'Git Agent': {'mode': True, 'id': "Git Agent"},
+        'Flask Agent': {'mode': True, 'id': "Flask Agent"},
+        'Firebase Agent': {'mode': True, 'id': "Firebase Agent"},
+        'FastAPI Agent': {'mode': True, 'id': "FastAPI Agent"},
+        'Erlang Agent': {'mode': True, 'id': "Erlang Agent"},
+        'Electron Agent': {'mode': True, 'id': "Electron Agent"},
+        'Docker Agent': {'mode': True, 'id': "Docker Agent"},
+        'DigitalOcean Agent': {'mode': True, 'id': "DigitalOcean Agent"},
+        'Bitbucket Agent': {'mode': True, 'id': "Bitbucket Agent"},
+        'Azure Agent': {'mode': True, 'id': "Azure Agent"},
+        'Flutter Agent': {'mode': True, 'id': "Flutter Agent"},
+        'Youtube Agent': {'mode': True, 'id': "Youtube Agent"},
+        'builder Agent': {'mode': True, 'id': "builder Agent"},
     }
-
-    userSelectedModel = {
-        "gpt-4o": "gpt-4o",
-        "gemini-pro": "gemini-pro",
-        'claude-sonnet-3.5': "claude-sonnet-3.5",
-    }
-
-    model_prefixes = {
-        'gpt-4o': '@GPT-4o',
-        'gemini-pro': '@Gemini-PRO',
-        'claude-sonnet-3.5': '@Claude-Sonnet-3.5',
-        'PythonAgent': '@Python Agent',
-        'JavaAgent': '@Java Agent',
-        'JavaScriptAgent': '@JavaScript Agent',
-        'HTMLAgent': '@HTML Agent',
-        'GoogleCloudAgent': '@Google Cloud Agent',
-        'AndroidDeveloper': '@Android Developer',
-        'SwiftDeveloper': '@Swift Developer',
-        'Next.jsAgent': '@Next.js Agent',
-        'MongoDBAgent': '@MongoDB Agent',
-        'PyTorchAgent': '@PyTorch Agent',
-        'ReactAgent': '@React Agent',
-        'XcodeAgent': '@Xcode Agent',
-        'AngularJSAgent': '@AngularJS Agent',
-        'blackboxai-pro': '@BLACKBOXAI-PRO',
-        'ImageGeneration': '@Image Generation',
-    }
-
-    model_referers = {
-        "blackboxai": "/?model=blackboxai",
-        "gpt-4o": "/?model=gpt-4o",
-        "gemini-pro": "/?model=gemini-pro",
-        "claude-sonnet-3.5": "/?model=claude-sonnet-3.5"
-    }
+    
+    premium_models = ['Claude-Sonnet-3.5']
+    
+    models = list(dict.fromkeys([default_model, *userSelectedModel, *image_models, *list(agentMode.keys()), *list(trendingAgentMode.keys())]))
 
     model_aliases = {
-        "gemini-flash": "gemini-1.5-flash",
-        "claude-3.5-sonnet": "claude-sonnet-3.5",
+        "gpt-4": "GPT-4o",
+        "gpt-4o": "GPT-4o",
+        "claude-3.5-sonnet": "Claude-Sonnet-3.5", # Premium
+        "gemini-1.5-flash": "gemini-1.5-flash",
+        "gemini-1.5-pro": "Gemini-PRO",
+        "deepseek-v3": "DeepSeek-V3",
+        "deepseek-r1": "DeepSeek-R1",
+        "llama-3.3-70b": "Meta-Llama-3.3-70B-Instruct-Turbo",
+        "mixtral-small-28b": "Mistral-Small-24B-Instruct-2501",
+        "deepseek-chat": "DeepSeek-LLM-Chat-(67B)",
+        "dbrx-instruct": "DBRX-Instruct",
+        "qwq-32b": "Qwen-QwQ-32B-Preview",
+        "hermes-2-dpo": "Nous-Hermes-2-Mixtral-8x7B-DPO",
+        "gemini-2.0-flash": "Gemini-Flash-2.0",
         "flux": "ImageGeneration",
     }
 
     @classmethod
-    def get_model(cls, model: str) -> str:
-        if model in cls.models:
-            return model
-        elif model in cls.model_aliases:
-            return cls.model_aliases[model]
-        else:
-            return cls.default_model
+    def get_models(cls) -> list[str]:
+        models = super().get_models()
+        filtered = [m for m in models if m not in cls.premium_models]
+        filtered += [f"{m} (Premium)" for m in cls.premium_models]
+        return filtered
 
-    @staticmethod
-    def generate_random_string(length: int = 7) -> str:
-        characters = string.ascii_letters + string.digits
-        return ''.join(random.choices(characters, k=length))
+    @classmethod
+    def get_model(cls, model: str, **kwargs) -> str:
+        try:
+            model = super().get_model(model, **kwargs)
+            return model.split(" (Premium)")[0]
+        except ModelNotSupportedError:
+            base_model = model.split(" (Premium)")[0]
+            if base_model in cls.premium_models:
+                return base_model
+            raise
 
-    @staticmethod
-    def generate_next_action() -> str:
-        return uuid.uuid4().hex
+    @classmethod
+    async def fetch_validated(cls, url: str = "https://www.blackbox.ai", force_refresh: bool = False) -> Optional[str]:
+        cache_file = Path(get_cookies_dir()) / 'blackbox.json'
+        
+        if not force_refresh and cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    data = json.load(f)
+                    if data.get('validated_value'):
+                        return data['validated_value']
+            except Exception as e:
+                print(f"Error reading cache: {e}")
+        
+        js_file_pattern = r'static/chunks/\d{4}-[a-fA-F0-9]+\.js'
+        uuid_pattern = r'["\']([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})["\']'
 
-    @staticmethod
-    def generate_next_router_state_tree() -> str:
-        router_state = [
-            "",
-            {
-                "children": [
-                    "(chat)",
-                    {
-                        "children": [
-                            "__PAGE__",
-                            {}
-                        ]
-                    }
-                ]
-            },
-            None,
-            None,
-            True
-        ]
-        return json.dumps(router_state)
+        def is_valid_context(text: str) -> bool:
+            return any(char + '=' in text for char in 'abcdefghijklmnopqrstuvwxyz')
 
-    @staticmethod
-    def clean_response(text: str) -> str:
-        pattern = r'^\$\@\$v=undefined-rv1\$\@\$'
-        cleaned_text = re.sub(pattern, '', text)
-        return cleaned_text
+        async with ClientSession() as session:
+            try:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return None
+
+                    page_content = await response.text()
+                    js_files = re.findall(js_file_pattern, page_content)
+
+                for js_file in js_files:
+                    js_url = f"{url}/_next/{js_file}"
+                    async with session.get(js_url) as js_response:
+                        if js_response.status == 200:
+                            js_content = await js_response.text()
+                            for match in re.finditer(uuid_pattern, js_content):
+                                start = max(0, match.start() - 10)
+                                end = min(len(js_content), match.end() + 10)
+                                context = js_content[start:end]
+
+                                if is_valid_context(context):
+                                    validated_value = match.group(1)
+                                    
+                                    cache_file.parent.mkdir(exist_ok=True)
+                                    try:
+                                        with open(cache_file, 'w') as f:
+                                            json.dump({'validated_value': validated_value}, f)
+                                    except Exception as e:
+                                        print(f"Error writing cache: {e}")
+                                        
+                                    return validated_value
+
+            except Exception as e:
+                print(f"Error retrieving validated_value: {e}")
+
+        return None
+
+    @classmethod
+    def generate_id(cls, length: int = 7) -> str:
+        chars = string.ascii_letters + string.digits
+        return ''.join(random.choice(chars) for _ in range(length))
 
     @classmethod
     async def create_async_generator(
         cls,
         model: str,
         messages: Messages,
-        proxy: Optional[str] = None,
-        image: ImageType = None,
-        image_name: str = None,
-        websearch: bool = False,
+        prompt: str = None,
+        proxy: str = None,
+        images: ImagesType = None,
+        top_p: float = None,
+        temperature: float = None,
+        max_tokens: int = None,
+        conversation: Conversation = None,
+        return_conversation: bool = False,
         **kwargs
-    ) -> AsyncGenerator[Union[str, ImageResponse], None]:
-        """
-        Creates an asynchronous generator for streaming responses from Blackbox AI.
-
-        Parameters:
-            model (str): Model to use for generating responses.
-            messages (Messages): Message history.
-            proxy (Optional[str]): Proxy URL, if needed.
-            image (ImageType): Image data to be processed, if any.
-            image_name (str): Name of the image file, if an image is provided.
-            websearch (bool): Enables or disables web search mode.
-            **kwargs: Additional keyword arguments.
-
-        Yields:
-            Union[str, ImageResponse]: Segments of the generated response or ImageResponse objects.
-        """
-        
-        if image is not None:
-            messages[-1]['data'] = {
-                'fileText': '',
-                'imageBase64': to_data_uri(image),
-                'title': image_name
-            }
-            messages[-1]['content'] = 'FILE:BB\n$#$\n\n$#$\n' + messages[-1]['content']
-        
+    ) -> AsyncResult:      
         model = cls.get_model(model)
-
-        chat_id = cls.generate_random_string()
-        next_action = cls.generate_next_action()
-        next_router_state_tree = cls.generate_next_router_state_tree()
-
-        agent_mode = cls.agentMode.get(model, {})
-        trending_agent_mode = cls.trendingAgentMode.get(model, {})
-
-        prefix = cls.model_prefixes.get(model, "")
-        
-        formatted_prompt = ""
-        for message in messages:
-            role = message.get('role', '').capitalize()
-            content = message.get('content', '')
-            if role and content:
-                formatted_prompt += f"{role}: {content}\n"
-        
-        if prefix:
-            formatted_prompt = f"{prefix} {formatted_prompt}".strip()
-
-        referer_path = cls.model_referers.get(model, f"/?model={model}")
-        referer_url = f"{cls.url}{referer_path}"
-
-        common_headers = {
+        headers = {
             'accept': '*/*',
             'accept-language': 'en-US,en;q=0.9',
-            'cache-control': 'no-cache',
-            'origin': cls.url,
-            'pragma': 'no-cache',
-            'priority': 'u=1, i',
-            'sec-ch-ua': '"Chromium";v="129", "Not=A?Brand";v="8"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Linux"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) '
-                          'AppleWebKit/537.36 (KHTML, like Gecko) '
-                          'Chrome/129.0.0.0 Safari/537.36'
+            'content-type': 'application/json',
+            'origin': 'https://www.blackbox.ai',
+            'referer': 'https://www.blackbox.ai/',
+            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
         }
-
-        headers_api_chat = {
-            'Content-Type': 'application/json',
-            'Referer': referer_url
-        }
-        headers_api_chat_combined = {**common_headers, **headers_api_chat}
-
-        payload_api_chat = {
-            "messages": [
-                {
-                    "id": chat_id,
-                    "content": formatted_prompt,
-                    "role": "user",
-					"data": messages[-1].get('data')
+        
+        async with ClientSession(headers=headers) as session:
+            if model in "ImageGeneration":
+                prompt = format_image_prompt(messages, prompt)
+                data = {
+                    "query": format_image_prompt(messages, prompt),
+                    "agentMode": True
                 }
-            ],
-            "id": chat_id,
-            "previewToken": None,
-            "userId": None,
-            "codeModelMode": True,
-            "agentMode": agent_mode,
-            "trendingAgentMode": trending_agent_mode,
-            "isMicMode": False,
-            "userSystemPrompt": None,
-            "maxTokens": 1024,
-            "playgroundTopP": 0.9,
-            "playgroundTemperature": 0.5,
-            "isChromeExt": False,
-            "githubToken": None,
-            "clickedAnswer2": False,
-            "clickedAnswer3": False,
-            "clickedForceWebSearch": False,
-            "visitFromDelta": False,
-            "mobileClient": False,
-            "webSearchMode": websearch,
-            "userSelectedModel": cls.userSelectedModel.get(model, model)
-        }
-
-        headers_chat = {
-            'Accept': 'text/x-component',
-            'Content-Type': 'text/plain;charset=UTF-8',
-            'Referer': f'{cls.url}/chat/{chat_id}?model={model}',
-            'next-action': next_action,
-            'next-router-state-tree': next_router_state_tree,
-            'next-url': '/'
-        }
-        headers_chat_combined = {**common_headers, **headers_chat}
-
-        data_chat = '[]'
-
-        async with ClientSession(headers=common_headers) as session:
-            try:
+                headers['content-type'] = 'text/plain;charset=UTF-8'
+                
                 async with session.post(
-                    cls.api_endpoint,
-                    headers=headers_api_chat_combined,
-                    json=payload_api_chat,
-                    proxy=proxy
-                ) as response_api_chat:
-                    response_api_chat.raise_for_status()
-                    text = await response_api_chat.text()
-                    cleaned_response = cls.clean_response(text)
+                    "https://www.blackbox.ai/api/image-generator",
+                    json=data,
+                    proxy=proxy,
+                    headers=headers
+                ) as response:
+                    await raise_for_status(response)
+                    response_json = await response.json()
+                    
+                    if "markdown" in response_json:
+                        image_url_match = re.search(r'!\[.*?\]\((.*?)\)', response_json["markdown"])
+                        if image_url_match:
+                            image_url = image_url_match.group(1)
+                            yield ImageResponse(images=[image_url], alt=format_image_prompt(messages, prompt))
+                            return
 
-                    if model in cls.image_models:
-                        match = re.search(r'!\[.*?\]\((https?://[^\)]+)\)', cleaned_response)
-                        if match:
-                            image_url = match.group(1)
-                            image_response = ImageResponse(images=image_url, alt="Generated Image")
-                            yield image_response
-                        else:
-                            yield cleaned_response
-                    else:
-                        if websearch:
-                            match = re.search(r'\$~~~\$(.*?)\$~~~\$', cleaned_response, re.DOTALL)
-                            if match:
-                                source_part = match.group(1).strip()
-                                answer_part = cleaned_response[match.end():].strip()
-                                try:
-                                    sources = json.loads(source_part)
-                                    source_formatted = "**Source:**\n"
-                                    for item in sources:
-                                        title = item.get('title', 'No Title')
-                                        link = item.get('link', '#')
-                                        position = item.get('position', '')
-                                        source_formatted += f"{position}. [{title}]({link})\n"
-                                    final_response = f"{answer_part}\n\n{source_formatted}"
-                                except json.JSONDecodeError:
-                                    final_response = f"{answer_part}\n\nSource information is unavailable."
-                            else:
-                                final_response = cleaned_response
-                        else:
-                            if '$~~~$' in cleaned_response:
-                                final_response = cleaned_response.split('$~~~$')[0].strip()
-                            else:
-                                final_response = cleaned_response
+            if conversation is None or not hasattr(conversation, "chat_id"):
+                conversation = Conversation(model)
+                conversation.validated_value = await cls.fetch_validated()
+                conversation.chat_id = cls.generate_id()
+                conversation.message_history = []
 
-                        yield final_response
-            except ClientResponseError as e:
-                error_text = f"Error {e.status}: {e.message}"
-                try:
-                    error_response = await e.response.text()
-                    cleaned_error = cls.clean_response(error_response)
-                    error_text += f" - {cleaned_error}"
-                except Exception:
-                    pass
-                yield error_text
-            except Exception as e:
-                yield f"Unexpected error during /api/chat request: {str(e)}"
+            current_messages = []
+            for i, msg in enumerate(messages):
+                msg_id = conversation.chat_id if i == 0 and msg["role"] == "user" else cls.generate_id()
+                current_msg = {
+                    "id": msg_id,
+                    "content": msg["content"],
+                    "role": msg["role"]
+                }
+                if msg["role"] == "assistant" and i == len(messages)-1:
+                    current_time = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+                    current_msg["createdAt"] = current_time
+                current_messages.append(current_msg)
+            
+            if images is not None:
+                current_messages[-1]['data'] = {
+                    "imagesData": [
+                        {
+                            "filePath": f"/{image_name}",
+                            "contents": to_data_uri(image)
+                        }
+                        for image, image_name in images
+                    ],
+                    "fileText": "",
+                    "title": ""
+                }
 
-            chat_url = f'{cls.url}/chat/{chat_id}?model={model}'
+            # Calculate the value for expires + lastChecked
+            expires_iso = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+            last_checked_millis = int(datetime.now().timestamp() * 1000)
+            
+            # Fake data of a premium user (temporarily working)
+            fake_session = {"user":{"name":"John Doe","email":"john.doe@gmail.com","image":"https://lh3.googleusercontent.com/a/ACg8ocK9X7mNpQ2vR4jH3tY8wL5nB1xM6fDS9JW2kLpTn4Vy3hR2xN4m=s96-c"},"expires":expires_iso}
+            fake_subscriptionCache = {"status":"PREMIUM", "expiryTimestamp":None,"lastChecked":last_checked_millis}
 
-            try:
-                async with session.post(
-                    chat_url,
-                    headers=headers_chat_combined,
-                    data=data_chat,
-                    proxy=proxy
-                ) as response_chat:
-                    response_chat.raise_for_status()
-                    pass
-            except ClientResponseError as e:
-                error_text = f"Error {e.status}: {e.message}"
-                try:
-                    error_response = await e.response.text()
-                    cleaned_error = cls.clean_response(error_response)
-                    error_text += f" - {cleaned_error}"
-                except Exception:
-                    pass
-                yield error_text
-            except Exception as e:
-                yield f"Unexpected error during /chat/{chat_id} request: {str(e)}"
+            data = {
+                "messages": current_messages,
+                "agentMode": cls.agentMode.get(model, {}) if model in cls.agentMode else {},
+                "id": conversation.chat_id,
+                "previewToken": None,
+                "userId": None,
+                "codeModelMode": True,
+                "trendingAgentMode": cls.trendingAgentMode.get(model, {}) if model in cls.trendingAgentMode else {},
+                "isMicMode": False,
+                "userSystemPrompt": None,
+                "maxTokens": max_tokens,
+                "playgroundTopP": top_p,
+                "playgroundTemperature": temperature,
+                "isChromeExt": False,
+                "githubToken": "",
+                "clickedAnswer2": False,
+                "clickedAnswer3": False,
+                "clickedForceWebSearch": False,
+                "visitFromDelta": False,
+                "isMemoryEnabled": False,
+                "mobileClient": False,
+                "userSelectedModel": model if model in cls.userSelectedModel else None,
+                "validated": conversation.validated_value,
+                "imageGenerationMode": False,
+                "webSearchModePrompt": False,
+                "deepSearchMode": False,
+                "domains": None,
+                "vscodeClient": False,
+                "codeInterpreterMode": False,
+                "customProfile": {"name": "", "occupation": "", "traits": [], "additionalInfo": "", "enableNewChats": False},
+                "session": fake_session,
+                "isPremium": True, 
+                "subscriptionCache": fake_subscriptionCache,
+                "webSearchMode": False
+            }
+            
+            async with session.post(cls.api_endpoint, json=data, proxy=proxy) as response:
+                await raise_for_status(response)
+                full_response = []
+                async for chunk in response.content.iter_any():
+                    if chunk:
+                        chunk_text = chunk.decode()
+                        full_response.append(chunk_text)
+                        yield chunk_text
+
+                if return_conversation:
+                    full_response_text = ''.join(full_response)
+                    conversation.message_history.append({"role": "assistant", "content": full_response_text})
+                    yield conversation
